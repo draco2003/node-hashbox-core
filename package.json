@@ -1,0 +1,9 @@
+{
+  "name": "hashbox-core",
+  "version": "0.0.1",
+  "description": "HashBox-Core under the hood of HashBox",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha -u tdd -R spec"
+  }
+}
