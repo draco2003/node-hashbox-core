@@ -15,7 +15,7 @@ var queryDefaults = {
   count: 100
 };
 
-var daysBeforeExpires, daysBeforeStale;
+var daysBeforeExpires, daysBeforeStale, alertLastSent;
 
 HashBoxCore.init = function(options) {
   var dbFile = options.database || './database/hashes.db';
@@ -58,6 +58,26 @@ HashBoxCore.init = function(options) {
   createDb();
 };
 
+HashBoxCore.triggerAlert = function(options, callback) {
+  var alertInterval = options.alertInterval || 1000;
+  var now = moment().unix();
+  if (_.isUndefined(alertLastSent)) {
+    debug('Sending Alert');
+    alertLastSent = now;
+  } else if ((now - alertLastSent) > alertInterval) {
+    debug('Its time to send a new alert');
+    alertLastSent = now;
+  } else {
+    debug('Alert triggered, but sent to recently.');
+  }
+
+  var err = false;
+  if (err) {
+    callback(err, null);
+  } else {
+    callback(err, null);
+  }
+};
 
 HashBoxCore.listStaleHashes = function(options, callback) {
   debug('listStaleHashes');
@@ -71,12 +91,12 @@ HashBoxCore.listStaleHashes = function(options, callback) {
   var limit = options.count || queryDefaults.count;
   var page = options.page || queryDefaults.page;
   var offset = limit * (page - 1);
-
+  debug('StaleTimestamp: ' + staleTimestamp + ' & ExpiredTimestamp: ' + expiredTimestamp );
   db.all(
     'SELECT * FROM Hash ' +
     'inner join HashVerify on Hash.id = HashVerify.hashId ' +
     'WHERE confirmedStaleAt is NULL ' +
-    'AND createdAt > ? AND updatedAt < ? ' +
+    'AND ( Hash.createdAt > ? OR HashVerify.updatedAt < ? ) ' +
     'LIMIT ? OFFSET ?',
     [expiredTimestamp, staleTimestamp, limit, offset], function(err, rows) {
     if (err) {
@@ -160,7 +180,11 @@ HashBoxCore.hashVerify = function(key, hash, callback) {
               if (err) {
                 fnErrors(err);
               } else {
-                fnSuccess();
+                HashBoxCore.triggerAlert({}, function(err, results) {
+                  console.log(err);
+                  console.log(results);
+                  fnSuccess();
+                });
               }
             });
           } else {
@@ -186,16 +210,19 @@ HashBoxCore.listAuditRecords = function(options, callback) {
     callback = options;
     options =  queryDefaults;
   }
+  var limit = options.count || queryDefaults.count;
+  var page = options.page || queryDefaults.page;
+  var offset = limit * (page - 1);
 
-  var staleTimestamp = moment().subtract('days', daysBeforeStale).unix();
   var expiredTimestamp = moment().subtract('days', daysBeforeExpires).unix();
 
   db.all(
     'SELECT * FROM Hash ' +
     'inner join HashAudit on Hash.id = HashAudit.hashId ' +
     'WHERE confirmedAt is NULL ' +
-    'AND createdAt > ?',
-    [expiredTimestamp], function(err, rows) {
+    'AND Hash.createdAt > ? ' +
+    'LIMIT ? OFFSET ?',
+    [expiredTimestamp, limit, offset], function(err, rows) {
     if (err) {
       callback(err, null);
     } else {
@@ -216,11 +243,14 @@ HashBoxCore.listHashes = function(options, callback) {
   var page = options.page || queryDefaults.page;
   var offset = limit * (page - 1);
 
-  var staleTimestamp = moment().subtract('days', daysBeforeStale).unix();
   var expiredTimestamp = moment().subtract('days', daysBeforeExpires).unix();
-
   db.all(
-    'SELECT * FROM Hash WHERE createdAt > ? ' +
+    'SELECT Hash.*, HashVerify.confirmedStaleAt, HashAudit.confirmedAt FROM Hash ' +
+    'LEFT JOIN HashVerify on Hash.id = HashVerify.hashId ' +
+    'LEFT JOIN HashAudit on Hash.id = HashAudit.hashId ' +
+    'WHERE Hash.createdAt > ? ' +
+    'AND confirmedAt is NULL ' +
+    'AND confirmedStaleAt is NULL ' +
     'LIMIT ? OFFSET ?', [expiredTimestamp, limit, offset], function(err, rows) {
     if (err) {
       callback(err, null);
@@ -231,38 +261,112 @@ HashBoxCore.listHashes = function(options, callback) {
 
 };
 
+HashBoxCore.acknowledge = function(options, hashIds, state, callback) {
+  debug('acknowledge');
+  var err = ''
+  , errors = [];
+
+  var asyncReturn = _.after(hashIds.length, function() {
+    console.log('returned');
+    callback(err, errors);
+  });
+
+  if (state === 'stale' || state === 'invalid') {
+    if (_.isArray(hashIds) && !_.isEmpty(hashIds)) {
+      console.log('everything looks good');
+      var newDate = new Date();
+      var newTime = newDate.getTime();
+      _.forEach(hashIds, function(hashId) {
+        console.log(hashId);
+        console.log(state);
+        if (state === 'stale') {
+          debug('updating verify entry');
+          db.run('UPDATE HashVerify SET confirmedStaleAt = ? WHERE id = ?;', [newTime, hashId], function(err) {
+            if (err) {
+              fnErrors(err);
+            } else {
+              asyncReturn();
+            }
+          });
+        } else {
+          debug('updating audit entry');
+          db.run('UPDATE HashAudit SET confirmedAt = ? WHERE id = ?;', [newTime, hashId], function(err) {
+            if (err) {
+              fnErrors(err);
+            } else {
+              // Get the New confirmed Hash and Key based off of the HashAudit Entry
+              db.get('SELECT key, HashAudit.hash FROM Hash JOIN HashAudit ON HashAudit.hashId = Hash.id WHERE HashAudit.id = ?',
+                [hashId], function(err, hashAuditRow) {
+                var newDate = new Date();
+                var newTime = newDate.getTime();
+                if (err) {
+                  fnErrors(err);
+                } else {
+                  // Create a new record  in the Hash Table with the associated new key and hash
+                  db.run('INSERT INTO Hash (key, hash, createdAt) VALUES (?, ?, ?);',
+                      [hashAuditRow.key, hashAuditRow.hash, newTime], function(err) {
+                    if (err) {
+                      fnErrors(err);
+                    } else {
+                      asyncReturn();
+                    }
+                  });
+                }
+              });
+            }
+          });
+        }
+      });
+    } else {
+      console.log('bad input');
+    }
+  } else {
+    console.log('bad input');
+  }
+};
+
 HashBoxCore.hashDetail = function(options, hashId, callback) {
   debug('hashDetails');
   if (typeof options === 'function') {
     callback = options;
     options =  queryDefaults;
   }
+  var results = {};
 
-  db.get('SELECT * FROM Hash WHERE id = ?', [hashId], function(err, hashRow) {
-    if (err) {
-      callback(err, null);
-    } else {
-      db.all(
-        'SELECT Hash.id, Hash.key, Hash.hash, Hash.createdAt, ' +
-        'HashVerify.createdAt as verifyCreatedAt, ' +
-        'HashVerify.updatedAt as verifyUpdatedAt, ' +
-        'HashVerify.confirmedStaleAt, ' +
-        'HashAudit.hash as auditHash, ' +
-        'HashAudit.createdAt as auditCreatedAt, ' +
-        'HashAudit.updatedAt as auditUpdatedAt, ' +
-        'HashAudit.confirmedAt as auditConfirmedAt ' +
-        'FROM Hash ' +
-        'LEFT JOIN HashVerify on Hash.id = HashVerify.hashId ' +
-        'LEFT JOIN HashAudit on Hash.id = HashAudit.hashId ' +
-        'WHERE key = ?', [hashRow.key], function(err, keyRows) {
-        if (err) {
-          callback(err, null);
-        } else {
-          callback(err, keyRows);
-        }
-      });
-    }
-  });
+  if (_.isNumber(hashId) && hashId > 0) {
+    db.get('SELECT * FROM Hash WHERE id = ?', [hashId], function(err, hashRow) {
+      if (err) {
+        callback(err, null);
+      } else {
+        results.hashRow = hashRow;
+        db.all('SELECT * FROM Hash WHERE key = ? AND id != ?' , [hashRow.key, hashId], function(err, keyRows) {
+          if (err) {
+            callback(err, null);
+          } else {
+            results.keyRows = keyRows;
+            db.all('SELECT * FROM HashVerify WHERE hashId IN (SELECT id FROM Hash WHERE key = ?)' , [hashRow.key], function(err, hashVerifyRows) {
+              if (err) {
+                callback(err, null);
+              } else {
+                results.hashVerifyRows = hashVerifyRows;
+                db.all('SELECT * FROM HashAudit WHERE hashId IN (SELECT id FROM Hash WHERE key = ?)' , [hashRow.key], function(err, hashAuditRows) {
+                  if (err) {
+                    callback(err, null);
+                  } else {
+                    results.hashAuditRows = hashAuditRows;
+                    console.log(results);
+                    callback(err, results);
+                  }
+                });
+              }
+            });
+          }
+        });
+      }
+    });
+  } else {
+    callback('Id not a valid HashId', null);
+  }
 };
 
 module.exports = HashBoxCore;

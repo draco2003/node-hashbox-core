@@ -11,25 +11,25 @@ HashBoxCore.init(options);
 describe('HashBoxCore', function() {
   describe('verify_hash', function() {
     it('should handle inserting hash', function(done) {
-      HashBoxCore.verify_hash('filename', 'hashtext', function(err) {
+      HashBoxCore.hashVerify('filename', 'hashtext', function(err) {
         assert.equal(err, null);
         done();
       });
     });
     it('should handle inserting same hash again', function(done) {
-      HashBoxCore.verify_hash('filename', 'hashtext', function(err) {
+      HashBoxCore.hashVerify('filename', 'hashtext', function(err) {
         assert.equal(err, null);
         done();
       });
     });
     it('should handle inserting same file different hash', function(done) {
-      HashBoxCore.verify_hash('filename', 'hashtext1', function(err) {
+      HashBoxCore.hashVerify('filename', 'hashtext1', function(err) {
         assert.equal(err, null);
         done();
       });
     });
     it('should handle inserting new file existing hash', function(done) {
-      HashBoxCore.verify_hash('filename', 'hashtext1', function(err) {
+      HashBoxCore.hashVerify('filename', 'hashtext1', function(err) {
         assert.equal(err, null);
         done();
       });
