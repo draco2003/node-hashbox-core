@@ -335,7 +335,10 @@ HashBoxCore.hashDetail = function(options, hashId, callback) {
 
   if (_.isNumber(hashId) && hashId > 0) {
     db.get('SELECT * FROM Hash WHERE id = ?', [hashId], function(err, hashRow) {
-      if (err) {
+      if (err || _.isUndefined(hashRow)) {
+        if (!err) {
+          var err = 'not a valid hashId';
+        }
         callback(err, null);
       } else {
         results.hashRow = hashRow;
